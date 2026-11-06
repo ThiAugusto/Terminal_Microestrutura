@@ -4,14 +4,12 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
-from datetime import datetime
 
 # ==========================================
 # 1. CONFIGURAÇÃO DA PÁGINA & ESTILO
 # ==========================================
 st.set_page_config(page_title="Terminal Quant | Microestrutura", layout="wide", initial_sidebar_state="expanded")
 
-# Estilização Bloomberg / Dark Mode Institucional
 bg_app = "#050505"
 bg_card = "#111111"
 border_color = "#333333"
@@ -24,17 +22,13 @@ st.markdown(f"""
     .block-container {{ padding-top: 1rem !important; padding-bottom: 1rem !important; }}
     [data-testid="stSidebar"] {{ background-color: {bg_card} !important; border-right: 1px solid {border_color} !important; }}
     .stApp {{ background-color: {bg_app}; color: {text_main} !important; font-family: 'Segoe UI', sans-serif; }}
-    
     div[data-testid="metric-container"] {{ 
         background-color: {bg_card}; border: 1px solid {border_color}; padding: 15px; 
         border-radius: 8px; box-shadow: 2px 2px 8px rgba(0, 0, 0, 0.4);
     }}
     div[data-testid="metric-container"] label {{ color: {text_highlight} !important; font-weight: bold; font-size: 1rem; }}
     div[data-testid="stMetricValue"] {{ color: {text_main} !important; }}
-    
     h1, h2, h3, h4 {{ color: {text_main} !important; }}
-    hr {{ border-bottom: 1px solid {border_color} !important; }}
-    
     .insight-box {{ background-color: {bg_card}; padding: 20px; border-left: 6px solid {text_highlight}; border-radius: 6px; line-height: 1.6; color: {text_main} !important; }}
     </style>
 """, unsafe_allow_html=True)
@@ -55,48 +49,55 @@ with st.sidebar:
     st.caption("Desenvolvido para Portfólio Quantitativo • Dados API Binance HFT")
 
 # ==========================================
-# 3. MOTOR DE DADOS & ENGENHARIA DE FEATURES
+# 3. MOTOR DE DADOS BLINDADO (COM TIMEOUT)
 # ==========================================
-@st.cache_data(ttl=15) # Cache inteligente de 15 segundos para evitar rate limit
+@st.cache_data(ttl=10)
 def carregar_dados_microestrutura(symbol, limit):
     url = f"https://api.binance.com/api/v3/trades?symbol={symbol}&limit={limit}"
-    resposta = requests.get(url)
-    
-    if resposta.status_code != 200:
-        return pd.DataFrame()
+    try:
+        # Timeout de 6 segundos para evitar travamentos na nuvem
+        resposta = requests.get(url, timeout=6)
+        if resposta.status_code != 200:
+            return pd.DataFrame()
+            
+        dados = resposta.json()
+        if not isinstance(dados, list) or len(dados) == 0:
+            return pd.DataFrame()
+            
+        df = pd.DataFrame(dados)
+        df['price'] = df['price'].astype(float)
+        df['qty'] = df['qty'].astype(float)
+        df['time'] = pd.to_datetime(df['time'], unit='ms')
         
-    df = pd.DataFrame(resposta.json())
-    df['price'] = df['price'].astype(float)
-    df['qty'] = df['qty'].astype(float)
-    df['time'] = pd.to_datetime(df['time'], unit='ms')
-    
-    # Lógica de Agressão Direcional
-    df['agressor'] = np.where(df['isBuyerMaker'], 'Vendedor', 'Comprador')
-    df['vol_compra'] = np.where(df['agressor'] == 'Comprador', df['qty'], 0)
-    df['vol_venda'] = np.where(df['agressor'] == 'Vendedor', df['qty'], 0)
-    df['delta'] = df['vol_compra'] - df['vol_venda']
-    df['cvd'] = df['delta'].cumsum()
-    
-    # VWAP e Bandas
-    df['pv'] = df['price'] * df['qty']
-    df['vwap'] = df['pv'].cumsum() / df['qty'].cumsum()
-    rolling_std = df['price'].rolling(window=50, min_periods=10).std()
-    df['vwap_up'] = df['vwap'] + (rolling_std * 1.2)
-    df['vwap_down'] = df['vwap'] - (rolling_std * 1.2)
-    
-    # Caçador de Icebergs (Absorção Oculta)
-    q98 = df['qty'].quantile(0.98)
-    df['preco_diff'] = df['price'].diff().abs()
-    df['iceberg_compra'] = (df['qty'] >= q98) & (df['agressor'] == 'Comprador') & (df['preco_diff'] <= df['price'].mean() * 0.0001)
-    df['iceberg_venda'] = (df['qty'] >= q98) & (df['agressor'] == 'Vendedor') & (df['preco_diff'] <= df['price'].mean() * 0.0001)
-    
-    return df
+        # Agressão Direcional
+        df['agressor'] = np.where(df['isBuyerMaker'], 'Vendedor', 'Comprador')
+        df['vol_compra'] = np.where(df['agressor'] == 'Comprador', df['qty'], 0)
+        df['vol_venda'] = np.where(df['agressor'] == 'Vendedor', df['qty'], 0)
+        df['delta'] = df['vol_compra'] - df['vol_venda']
+        df['cvd'] = df['delta'].cumsum()
+        
+        # VWAP e Bandas
+        df['pv'] = df['price'] * df['qty']
+        df['vwap'] = df['pv'].cumsum() / df['qty'].cumsum()
+        rolling_std = df['price'].rolling(window=50, min_periods=10).std()
+        df['vwap_up'] = df['vwap'] + (rolling_std * 1.2)
+        df['vwap_down'] = df['vwap'] - (rolling_std * 1.2)
+        
+        # Caçador de Icebergs
+        q98 = df['qty'].quantile(0.98)
+        df['preco_diff'] = df['price'].diff().abs()
+        df['iceberg_compra'] = (df['qty'] >= q98) & (df['agressor'] == 'Comprador') & (df['preco_diff'] <= df['price'].mean() * 0.0001)
+        df['iceberg_venda'] = (df['qty'] >= q98) & (df['agressor'] == 'Vendedor') & (df['preco_diff'] <= df['price'].mean() * 0.0001)
+        
+        return df
+    except Exception as e:
+        return pd.DataFrame()
 
 with st.spinner(f"A capturar fluxo institucional de {simbolo}..."):
     df = carregar_dados_microestrutura(simbolo, limite_ticks)
 
 if df.empty:
-    st.error("Erro ao comunicar com a API da Binance. Por favor, atualize a página.")
+    st.error("⚠️ Erro temporário ao comunicar com a Binance ou dados vazios. Por favor, clique em 'Rerun' no canto superior direito.")
     st.stop()
 
 # ==========================================
@@ -120,9 +121,9 @@ col4.metric("Saldo Delta (CVD)", f"{saldo_delta:,.2f}", delta_color="normal" if 
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ==========================================
-# 5. CÁLCULO DO VOLUME PROFILE (VPOC & VA)
+# 5. VOLUME PROFILE COM TRAVA DE SEGURANÇA
 # ==========================================
-tick_size = max(0.5, preco_atual * 0.0002) # Dinâmico conforme o ativo
+tick_size = max(0.5, preco_atual * 0.0002)
 df['price_bin'] = (df['price'] // tick_size) * tick_size
 vol_profile = df.groupby('price_bin')['qty'].sum().sort_index()
 vpoc_price = vol_profile.idxmax()
@@ -133,7 +134,9 @@ va_vol = vol_profile.loc[vpoc_price]
 val, vah = vpoc_price, vpoc_price
 prices = vol_profile.index.tolist()
 
-while va_vol < target_vol:
+# Laço seguro com limite máximo de iterações para evitar loop infinito
+iteracoes = 0
+while va_vol < target_vol and iteracoes < len(prices):
     idx_val = prices.index(val)
     idx_vah = prices.index(vah)
     vol_down = vol_profile.iloc[idx_val - 1] if idx_val > 0 else 0
@@ -145,6 +148,7 @@ while va_vol < target_vol:
     else:
         vah = prices[idx_vah + 1]
         va_vol += vol_up
+    iteracoes += 1
 
 # ==========================================
 # 6. CONSTRUÇÃO DO GRÁFICO PLOTLY
@@ -153,21 +157,17 @@ fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                     vertical_spacing=0.03, row_heights=[0.75, 0.25],
                     subplot_titles=("Ação do Preço & Camadas Institucionais", "Cumulative Volume Delta (CVD)"))
 
-# Preço Principal
 fig.add_trace(go.Scatter(x=df['time'], y=df['price'], mode='lines', name='Preço', line=dict(color='#E0E0E0', width=1.2)), row=1, col=1)
 
-# VWAP e Bandas
 if show_vwap:
     fig.add_trace(go.Scatter(x=df['time'], y=df['vwap'], mode='lines', name='VWAP', line=dict(color='#FF9800', width=2)), row=1, col=1)
     fig.add_trace(go.Scatter(x=df['time'], y=df['vwap_up'], mode='lines', name='Banda Superior (+1.2σ)', line=dict(color='rgba(255,152,0,0.2)', width=1, dash='dot')), row=1, col=1)
     fig.add_trace(go.Scatter(x=df['time'], y=df['vwap_down'], mode='lines', name='Banda Inferior (-1.2σ)', line=dict(color='rgba(255,152,0,0.2)', width=1, dash='dot'), fill='tonexty', fillcolor='rgba(255,152,0,0.04)'), row=1, col=1)
 
-# Value Area e VPOC
 if show_va:
     fig.add_hrect(y0=val, y1=vah, line_width=0, fillcolor="#42A5F5", opacity=0.10, row=1, col=1, annotation_text=" Value Area (70%)", annotation_position="top left", annotation_font_color="#42A5F5")
     fig.add_hline(y=vpoc_price, line_dash="dash", line_color="#FFB300", line_width=1.5, row=1, col=1, annotation_text=f" VPOC: ${vpoc_price:,.2f}", annotation_font_color="#FFB300")
 
-# Icebergs Ocultos
 if show_icebergs:
     ice_c = df[df['iceberg_compra']]
     ice_v = df[df['iceberg_venda']]
@@ -176,7 +176,6 @@ if show_icebergs:
     if not ice_v.empty:
         fig.add_trace(go.Scatter(x=ice_v['time'], y=ice_v['price'], mode='markers', name='⚠️ Iceberg (Venda)', marker=dict(color='#FF00FF', size=11, symbol='hexagon')), row=1, col=1)
 
-# CVD no Subplot Inferior
 cor_cvd = '#00E676' if saldo_delta > 0 else '#FF1744'
 fig.add_trace(go.Scatter(x=df['time'], y=df['cvd'], mode='lines', fill='tozeroy', name='CVD', line=dict(color=cor_cvd, width=2.5)), row=2, col=1)
 
@@ -191,7 +190,7 @@ fig.update_layout(
 st.plotly_chart(fig, use_container_width=True)
 
 # ==========================================
-# 7. PAINEL DE INSIGHTS E DOCUMENTAÇÃO TÉCNICA
+# 7. PAINEL DE INSIGHTS
 # ==========================================
 st.markdown("<br>", unsafe_allow_html=True)
 st.markdown(f"""
