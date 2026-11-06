@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import requests
 
 # ==========================================
 # 1. CONFIGURAÇÃO DA PÁGINA & ESTILO
@@ -46,80 +45,55 @@ with st.sidebar:
     show_va = st.checkbox("Value Area (70%) & VPOC", value=True)
     show_icebergs = st.checkbox("Detector de Icebergs (Absorção)", value=True)
     st.markdown("<br><br>", unsafe_allow_html=True)
-    st.caption("Desenvolvido para Portfólio Quantitativo • Mock/Live Data")
+    st.caption("Desenvolvido para Portfólio Quantitativo • Mock Data")
 
 # ==========================================
-# 3. MOTOR DE DADOS HÍBRIDO (LIVE + MOCK ANTI-BLOQUEIO)
+# 3. MOTOR QUANTITATIVO (MODO PORTFÓLIO FORÇADO)
 # ==========================================
 @st.cache_data(ttl=10)
 def carregar_dados_microestrutura(symbol, limit):
-    url = f"https://api.binance.com/api/v3/trades?symbol={symbol}&limit={limit}"
-    usar_simulacao = False
+    # DADOS SIMULADOS PARA CONTORNAR O BLOQUEIO DE IP DA NUVEM
+    np.random.seed(np.random.randint(0, 1000))
+    tempos = pd.date_range(end=pd.Timestamp.now(), periods=limit, freq='100ms')
+    base_price = 90000 if symbol == "BTCUSDT" else (3000 if symbol == "ETHUSDT" else 150)
+    precos_simulados = base_price + np.cumsum(np.random.normal(0, base_price * 0.0001, limit))
+    quantidades = np.random.exponential(0.1, limit) + 0.001
+    is_buyer_maker = np.random.choice([True, False], limit)
     
-    try:
-        resposta = requests.get(url, timeout=5)
-        dados = resposta.json()
+    df = pd.DataFrame({
+        'price': precos_simulados,
+        'qty': quantidades,
+        'time': tempos,
+        'isBuyerMaker': is_buyer_maker
+    })
         
-        # Se a API bloquear (devolver um erro em vez de lista de trades), ativamos o Plano B
-        if resposta.status_code != 200 or (isinstance(dados, dict) and 'msg' in dados):
-            usar_simulacao = True
-    except:
-        usar_simulacao = True
-        
-    if usar_simulacao:
-        # GERADOR DE DADOS MOCK (O teu código do Colab)
-        np.random.seed(np.random.randint(0, 1000)) # Semente aleatória para o gráfico mudar ao atualizar
-        tempos = pd.date_range(end=pd.Timestamp.now(), periods=limit, freq='100ms')
-        base_price = 90000 if symbol == "BTCUSDT" else (3000 if symbol == "ETHUSDT" else 150)
-        precos_simulados = base_price + np.cumsum(np.random.normal(0, base_price * 0.0001, limit))
-        quantidades = np.random.exponential(0.1, limit) + 0.001
-        is_buyer_maker = np.random.choice([True, False], limit)
-        
-        df = pd.DataFrame({
-            'price': precos_simulados,
-            'qty': quantidades,
-            'time': tempos,
-            'isBuyerMaker': is_buyer_maker
-        })
-    else:
-        df = pd.DataFrame(dados)
-        df['price'] = df['price'].astype(float)
-        df['qty'] = df['qty'].astype(float)
-        df['time'] = pd.to_datetime(df['time'], unit='ms')
-        
-    # Agressão Direcional
     df['agressor'] = np.where(df['isBuyerMaker'], 'Vendedor', 'Comprador')
     df['vol_compra'] = np.where(df['agressor'] == 'Comprador', df['qty'], 0)
     df['vol_venda'] = np.where(df['agressor'] == 'Vendedor', df['qty'], 0)
     df['delta'] = df['vol_compra'] - df['vol_venda']
     df['cvd'] = df['delta'].cumsum()
     
-    # VWAP e Bandas
     df['pv'] = df['price'] * df['qty']
     df['vwap'] = df['pv'].cumsum() / df['qty'].cumsum()
     rolling_std = df['price'].rolling(window=50, min_periods=10).std()
     df['vwap_up'] = df['vwap'] + (rolling_std * 1.2)
     df['vwap_down'] = df['vwap'] - (rolling_std * 1.2)
     
-    # Caçador de Icebergs
     q98 = df['qty'].quantile(0.98)
     df['preco_diff'] = df['price'].diff().abs()
     df['iceberg_compra'] = (df['qty'] >= q98) & (df['agressor'] == 'Comprador') & (df['preco_diff'] <= df['price'].mean() * 0.0001)
     df['iceberg_venda'] = (df['qty'] >= q98) & (df['agressor'] == 'Vendedor') & (df['preco_diff'] <= df['price'].mean() * 0.0001)
     
-    return df, usar_simulacao
+    return df
 
 with st.spinner(f"A carregar motor quantitativo para {simbolo}..."):
-    df, foi_simulado = carregar_dados_microestrutura(simbolo, limite_ticks)
+    df = carregar_dados_microestrutura(simbolo, limite_ticks)
 
 # ==========================================
 # 4. CABEÇALHO E MÉTRICAS
 # ==========================================
 st.title("🔬 TERMINAL DE MICROESTRUTURA & ORDER FLOW")
-if foi_simulado:
-    st.warning("⚠️ Modo Offline/Portfólio: A usar motor quantitativo de simulação de alta fidelidade devido a bloqueio geográfico da API.")
-else:
-    st.success("✅ Conectado em tempo real à API institucional.")
+st.warning("⚠️ Modo Portfólio Ativo: A usar motor quantitativo de simulação de alta fidelidade para contornar bloqueios da corretora.")
 st.divider()
 
 preco_atual = df['price'].iloc[-1]
@@ -152,53 +126,3 @@ prices = vol_profile.index.tolist()
 iteracoes = 0
 while va_vol < target_vol and iteracoes < len(prices):
     idx_val = prices.index(val)
-    idx_vah = prices.index(vah)
-    vol_down = vol_profile.iloc[idx_val - 1] if idx_val > 0 else 0
-    vol_up = vol_profile.iloc[idx_vah + 1] if idx_vah < len(prices) - 1 else 0
-    if vol_down == 0 and vol_up == 0: break
-    if vol_down >= vol_up:
-        val = prices[idx_val - 1]
-        va_vol += vol_down
-    else:
-        vah = prices[idx_vah + 1]
-        va_vol += vol_up
-    iteracoes += 1
-
-# ==========================================
-# 6. CONSTRUÇÃO DO GRÁFICO PLOTLY
-# ==========================================
-fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
-                    vertical_spacing=0.03, row_heights=[0.75, 0.25],
-                    subplot_titles=("Ação do Preço & Camadas Institucionais", "Cumulative Volume Delta (CVD)"))
-
-fig.add_trace(go.Scatter(x=df['time'], y=df['price'], mode='lines', name='Preço', line=dict(color='#E0E0E0', width=1.2)), row=1, col=1)
-
-if show_vwap:
-    fig.add_trace(go.Scatter(x=df['time'], y=df['vwap'], mode='lines', name='VWAP', line=dict(color='#FF9800', width=2)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df['time'], y=df['vwap_up'], mode='lines', name='Banda Superior (+1.2σ)', line=dict(color='rgba(255,152,0,0.2)', width=1, dash='dot')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df['time'], y=df['vwap_down'], mode='lines', name='Banda Inferior (-1.2σ)', line=dict(color='rgba(255,152,0,0.2)', width=1, dash='dot'), fill='tonexty', fillcolor='rgba(255,152,0,0.04)'), row=1, col=1)
-
-if show_va:
-    fig.add_hrect(y0=val, y1=vah, line_width=0, fillcolor="#42A5F5", opacity=0.10, row=1, col=1, annotation_text=" Value Area (70%)", annotation_position="top left", annotation_font_color="#42A5F5")
-    fig.add_hline(y=vpoc_price, line_dash="dash", line_color="#FFB300", line_width=1.5, row=1, col=1, annotation_text=f" VPOC: ${vpoc_price:,.2f}", annotation_font_color="#FFB300")
-
-if show_icebergs:
-    ice_c = df[df['iceberg_compra']]
-    ice_v = df[df['iceberg_venda']]
-    if not ice_c.empty:
-        fig.add_trace(go.Scatter(x=ice_c['time'], y=ice_c['price'], mode='markers', name='⚠️ Iceberg (Compra)', marker=dict(color='#00FFFF', size=11, symbol='hexagon')), row=1, col=1)
-    if not ice_v.empty:
-        fig.add_trace(go.Scatter(x=ice_v['time'], y=ice_v['price'], mode='markers', name='⚠️ Iceberg (Venda)', marker=dict(color='#FF00FF', size=11, symbol='hexagon')), row=1, col=1)
-
-cor_cvd = '#00E676' if saldo_delta > 0 else '#FF1744'
-fig.add_trace(go.Scatter(x=df['time'], y=df['cvd'], mode='lines', fill='tozeroy', name='CVD', line=dict(color=cor_cvd, width=2.5)), row=2, col=1)
-
-fig.update_layout(
-    template='plotly_dark',
-    height=720,
-    margin=dict(l=10, r=10, t=30, b=10),
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    hovermode='x unified'
-)
-
-st.plotly_chart(fig, use_container_width=True)
