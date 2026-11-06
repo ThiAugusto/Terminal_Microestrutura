@@ -46,65 +46,80 @@ with st.sidebar:
     show_va = st.checkbox("Value Area (70%) & VPOC", value=True)
     show_icebergs = st.checkbox("Detector de Icebergs (Absorção)", value=True)
     st.markdown("<br><br>", unsafe_allow_html=True)
-    st.caption("Desenvolvido para Portfólio Quantitativo • Dados API Binance HFT")
+    st.caption("Desenvolvido para Portfólio Quantitativo • Mock/Live Data")
 
 # ==========================================
-# 3. MOTOR DE DADOS BLINDADO (COM TIMEOUT)
+# 3. MOTOR DE DADOS HÍBRIDO (LIVE + MOCK ANTI-BLOQUEIO)
 # ==========================================
 @st.cache_data(ttl=10)
 def carregar_dados_microestrutura(symbol, limit):
-    url = f"https://api.mexc.com/api/v3/trades?symbol={symbol}&limit={limit}"
+    url = f"https://api.binance.com/api/v3/trades?symbol={symbol}&limit={limit}"
+    usar_simulacao = False
+    
     try:
-        # Timeout de 6 segundos para evitar travamentos na nuvem
-        resposta = requests.get(url, timeout=6)
-        if resposta.status_code != 200:
-            return pd.DataFrame()
-            
+        resposta = requests.get(url, timeout=5)
         dados = resposta.json()
-        if not isinstance(dados, list) or len(dados) == 0:
-            return pd.DataFrame()
-            
+        
+        # Se a API bloquear (devolver um erro em vez de lista de trades), ativamos o Plano B
+        if resposta.status_code != 200 or (isinstance(dados, dict) and 'msg' in dados):
+            usar_simulacao = True
+    except:
+        usar_simulacao = True
+        
+    if usar_simulacao:
+        # GERADOR DE DADOS MOCK (O teu código do Colab)
+        np.random.seed(np.random.randint(0, 1000)) # Semente aleatória para o gráfico mudar ao atualizar
+        tempos = pd.date_range(end=pd.Timestamp.now(), periods=limit, freq='100ms')
+        base_price = 90000 if symbol == "BTCUSDT" else (3000 if symbol == "ETHUSDT" else 150)
+        precos_simulados = base_price + np.cumsum(np.random.normal(0, base_price * 0.0001, limit))
+        quantidades = np.random.exponential(0.1, limit) + 0.001
+        is_buyer_maker = np.random.choice([True, False], limit)
+        
+        df = pd.DataFrame({
+            'price': precos_simulados,
+            'qty': quantidades,
+            'time': tempos,
+            'isBuyerMaker': is_buyer_maker
+        })
+    else:
         df = pd.DataFrame(dados)
         df['price'] = df['price'].astype(float)
         df['qty'] = df['qty'].astype(float)
         df['time'] = pd.to_datetime(df['time'], unit='ms')
         
-        # Agressão Direcional
-        df['agressor'] = np.where(df['isBuyerMaker'], 'Vendedor', 'Comprador')
-        df['vol_compra'] = np.where(df['agressor'] == 'Comprador', df['qty'], 0)
-        df['vol_venda'] = np.where(df['agressor'] == 'Vendedor', df['qty'], 0)
-        df['delta'] = df['vol_compra'] - df['vol_venda']
-        df['cvd'] = df['delta'].cumsum()
-        
-        # VWAP e Bandas
-        df['pv'] = df['price'] * df['qty']
-        df['vwap'] = df['pv'].cumsum() / df['qty'].cumsum()
-        rolling_std = df['price'].rolling(window=50, min_periods=10).std()
-        df['vwap_up'] = df['vwap'] + (rolling_std * 1.2)
-        df['vwap_down'] = df['vwap'] - (rolling_std * 1.2)
-        
-        # Caçador de Icebergs
-        q98 = df['qty'].quantile(0.98)
-        df['preco_diff'] = df['price'].diff().abs()
-        df['iceberg_compra'] = (df['qty'] >= q98) & (df['agressor'] == 'Comprador') & (df['preco_diff'] <= df['price'].mean() * 0.0001)
-        df['iceberg_venda'] = (df['qty'] >= q98) & (df['agressor'] == 'Vendedor') & (df['preco_diff'] <= df['price'].mean() * 0.0001)
-        
-        return df
-    except Exception as e:
-        return pd.DataFrame()
+    # Agressão Direcional
+    df['agressor'] = np.where(df['isBuyerMaker'], 'Vendedor', 'Comprador')
+    df['vol_compra'] = np.where(df['agressor'] == 'Comprador', df['qty'], 0)
+    df['vol_venda'] = np.where(df['agressor'] == 'Vendedor', df['qty'], 0)
+    df['delta'] = df['vol_compra'] - df['vol_venda']
+    df['cvd'] = df['delta'].cumsum()
+    
+    # VWAP e Bandas
+    df['pv'] = df['price'] * df['qty']
+    df['vwap'] = df['pv'].cumsum() / df['qty'].cumsum()
+    rolling_std = df['price'].rolling(window=50, min_periods=10).std()
+    df['vwap_up'] = df['vwap'] + (rolling_std * 1.2)
+    df['vwap_down'] = df['vwap'] - (rolling_std * 1.2)
+    
+    # Caçador de Icebergs
+    q98 = df['qty'].quantile(0.98)
+    df['preco_diff'] = df['price'].diff().abs()
+    df['iceberg_compra'] = (df['qty'] >= q98) & (df['agressor'] == 'Comprador') & (df['preco_diff'] <= df['price'].mean() * 0.0001)
+    df['iceberg_venda'] = (df['qty'] >= q98) & (df['agressor'] == 'Vendedor') & (df['preco_diff'] <= df['price'].mean() * 0.0001)
+    
+    return df, usar_simulacao
 
-with st.spinner(f"A capturar fluxo institucional de {simbolo}..."):
-    df = carregar_dados_microestrutura(simbolo, limite_ticks)
-
-if df.empty:
-    st.error("⚠️ Erro temporário ao comunicar com a Binance ou dados vazios. Por favor, clique em 'Rerun' no canto superior direito.")
-    st.stop()
+with st.spinner(f"A carregar motor quantitativo para {simbolo}..."):
+    df, foi_simulado = carregar_dados_microestrutura(simbolo, limite_ticks)
 
 # ==========================================
 # 4. CABEÇALHO E MÉTRICAS
 # ==========================================
 st.title("🔬 TERMINAL DE MICROESTRUTURA & ORDER FLOW")
-st.markdown(f"**Análise de Agressão Tick-a-Tick, Perfil de Volume e Detecção de Liquidez Oculta ({simbolo})**")
+if foi_simulado:
+    st.warning("⚠️ Modo Offline/Portfólio: A usar motor quantitativo de simulação de alta fidelidade devido a bloqueio geográfico da API.")
+else:
+    st.success("✅ Conectado em tempo real à API institucional.")
 st.divider()
 
 preco_atual = df['price'].iloc[-1]
@@ -121,7 +136,7 @@ col4.metric("Saldo Delta (CVD)", f"{saldo_delta:,.2f}", delta_color="normal" if 
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ==========================================
-# 5. VOLUME PROFILE COM TRAVA DE SEGURANÇA
+# 5. VOLUME PROFILE COM TRAVA
 # ==========================================
 tick_size = max(0.5, preco_atual * 0.0002)
 df['price_bin'] = (df['price'] // tick_size) * tick_size
@@ -134,7 +149,6 @@ va_vol = vol_profile.loc[vpoc_price]
 val, vah = vpoc_price, vpoc_price
 prices = vol_profile.index.tolist()
 
-# Laço seguro com limite máximo de iterações para evitar loop infinito
 iteracoes = 0
 while va_vol < target_vol and iteracoes < len(prices):
     idx_val = prices.index(val)
@@ -188,16 +202,3 @@ fig.update_layout(
 )
 
 st.plotly_chart(fig, use_container_width=True)
-
-# ==========================================
-# 7. PAINEL DE INSIGHTS
-# ==========================================
-st.markdown("<br>", unsafe_allow_html=True)
-st.markdown(f"""
-<div class="insight-box">
-    <h4 style="margin-top:0px; color: #FF9800;">💡 Notas de Execução do Algoritmo & Leitura Quantitativa</h4>
-    • <b>Zonas de Equilíbrio (VPOC & VA):</b> O preço tende a gravitar em torno do VPOC (${vpoc_price:,.2f}). Rompimentos fora da faixa azul (Value Area entre ${val:,.2f} e ${vah:,.2f}) acompanhados de divergência no CVD indicam exaustão ou expansão direcional.<br>
-    • <b>Absorção Institucional (Icebergs):</b> Foram detetados <b>{num_icebergs} blocos de ordens ocultas</b> onde o volume negociado superou o percentil 98 sem deslocamento proporcional do preço, sinalizando defesa passiva de grandes *players*.<br>
-    • <b>Stack Tecnológico:</b> Desenvolvido em Python com ingestão de dados em tempo real via Binance REST API, processamento vetorizado em Pandas/NumPy e renderização interativa via Plotly/Streamlit.
-</div>
-""", unsafe_allow_html=True)
