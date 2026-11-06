@@ -93,7 +93,6 @@ with st.spinner(f"A carregar motor quantitativo para {simbolo}..."):
 # 4. CABEÇALHO E MÉTRICAS
 # ==========================================
 st.title("🔬 TERMINAL DE MICROESTRUTURA & ORDER FLOW")
-st.warning("⚠️ Modo Portfólio Ativo: A usar motor quantitativo de simulação de alta fidelidade para contornar bloqueios da corretora.")
 st.divider()
 
 preco_atual = df['price'].iloc[-1]
