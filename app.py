@@ -53,7 +53,7 @@ with st.sidebar:
 # ==========================================
 @st.cache_data(ttl=10)
 def carregar_dados_microestrutura(symbol, limit):
-    url = f"https://data-api.binance.vision/api/v3/trades?symbol={symbol}&limit={limit}"
+    url = f"https://data-api1.binance.com/api/v3/trades?symbol={symbol}&limit={limit}"
     try:
         # Timeout de 6 segundos para evitar travamentos na nuvem
         resposta = requests.get(url, timeout=6)
